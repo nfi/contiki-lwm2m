@@ -49,8 +49,10 @@
 
 #define REMOTE_PORT     UIP_HTONS(COAP_DEFAULT_PORT)
 
-static const char *service_urls[] =
-  { ".well-known/core", "/3/0/3", "/3/0/1" };
+#define URL_WELL_KNOWN               ".well-known/core"
+#define URL_DEVICE_MODEL             "/3/0/1"
+#define URL_DEVICE_FIRMWARE_VERSION  "/3/0/3"
+#define URL_LIGHT_CONTROL            "/3311/0/5850"
 
 #define MAX_NODES 10
 
@@ -66,6 +68,7 @@ static struct node nodes[MAX_NODES];
 static uint8_t node_count;
 
 static struct node *current_target;
+static uint8_t fetching_type = 0;
 
 PROCESS(router_process, "router process");
 AUTOSTART_PROCESSES(&router_process);
@@ -96,8 +99,10 @@ client_chunk_handler(void *response)
 {
   const uint8_t *chunk;
   int len = coap_get_payload(response, &chunk);
-  printf("|%.*s", len, (char *)chunk);
-  if(current_target != NULL) {
+  if(len > 0) {
+    printf("|%.*s", len, (char *)chunk);
+  }
+  if(current_target != NULL && fetching_type) {
     if(len > sizeof(current_target->type) - 1) {
       len = sizeof(current_target->type) - 1;
     }
@@ -190,13 +195,11 @@ PROCESS_THREAD(router_process, ev, data)
      packet reception rates. */
   NETSTACK_MAC.off(1);
 
-  etimer_set(&timer, CLOCK_SECOND);
   while(1) {
+    etimer_set(&timer, CLOCK_SECOND * 5);
     PROCESS_YIELD();
 
-    if(ev == PROCESS_EVENT_TIMER && etimer_expired(&timer)) {
-      etimer_restart(&timer);
-
+    if(etimer_expired(&timer)) {
       current_target = NULL;
       n = 0;
       for(r = uip_ds6_route_head(); r != NULL; r = uip_ds6_route_next(r)) {
@@ -221,22 +224,41 @@ PROCESS_THREAD(router_process, ev, data)
         break;
       }
       PRINTF("Found %u new routes\n", n);
+    }
 
-      if(current_target != NULL &&
-         (current_target->flags & NODE_HAS_TYPE) == 0 &&
-         current_target->retries < 6) {
+    if(current_target != NULL &&
+       (current_target->flags & NODE_HAS_TYPE) == 0 &&
+       current_target->retries < 6) {
+
+      /* prepare request, TID is set by COAP_BLOCKING_REQUEST() */
+      coap_init_message(request, COAP_TYPE_CON, COAP_GET, 0);
+      coap_set_header_uri_path(request, URL_DEVICE_MODEL);
+
+      current_target->retries++;
+
+      PRINTF("CoAP request to ");
+      PRINT6ADDR(&current_target->ipaddr);
+      PRINTF(" : %u (%u tx)\n", UIP_HTONS(REMOTE_PORT),
+             current_target->retries);
+
+      fetching_type = 1;
+      COAP_BLOCKING_REQUEST(&current_target->ipaddr, REMOTE_PORT, request,
+                            client_chunk_handler);
+      fetching_type = 0;
+
+      printf("\n--Done--\n");
+
+      if(current_target->flags & NODE_HAS_TYPE) {
         /* prepare request, TID is set by COAP_BLOCKING_REQUEST() */
-        coap_init_message(request, COAP_TYPE_CON, COAP_GET, 0);
-        coap_set_header_uri_path(request, service_urls[2]);
+        coap_init_message(request, COAP_TYPE_CON, COAP_PUT, 0);
+        coap_set_header_uri_path(request, URL_LIGHT_CONTROL);
 
-        current_target->retries++;
-        /* const char msg[] = "Toggle!"; */
-        /* coap_set_payload(request, (uint8_t *)msg, sizeof(msg) - 1); */
+        const char msg[] = "1";
+        coap_set_payload(request, (uint8_t *)msg, sizeof(msg) - 1);
 
-        PRINTF("CoAP request to ");
+        PRINTF("CoAP light control to ");
         PRINT6ADDR(&current_target->ipaddr);
-        PRINTF(" : %u (%u tx)\n", UIP_HTONS(REMOTE_PORT),
-               current_target->retries);
+        PRINTF(" : %u\n", UIP_HTONS(REMOTE_PORT));
 
         COAP_BLOCKING_REQUEST(&current_target->ipaddr, REMOTE_PORT, request,
                               client_chunk_handler);

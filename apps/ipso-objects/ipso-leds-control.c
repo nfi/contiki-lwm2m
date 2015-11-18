@@ -36,7 +36,7 @@
 
 /**
  * \file
- *         Implementation of OMA LWM2M / IPSO Ligt Control for LEDs
+ *         Implementation of OMA LWM2M / IPSO Light Control for LEDs
  * \author
  *         Joakim Eriksson <joakime@sics.se>
  *         Niclas Finne <nfi@sics.se>
@@ -184,7 +184,8 @@ ipso_leds_control_init(void)
   /* register this device and its handlers - the handlers automatically
      sends in the object to handle */
   lwm2m_engine_register_object(&leds_control);
-  PRINTF("IPSO leds control initialized\n");
+  PRINTF("IPSO leds control initialized with %u instances\n",
+         LEDS_CONTROL_NUMBER);
 }
 /*---------------------------------------------------------------------------*/
 /** @} */
