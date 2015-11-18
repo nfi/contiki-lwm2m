@@ -42,15 +42,50 @@
 #include "net/netstack.h"
 #include "er-coap-constants.h"
 #include "er-coap-engine.h"
+#include "lwm2m-engine.h"
 
 #define DEBUG DEBUG_PRINT
 #include "net/ip/uip-debug.h"
 
-#define LOCAL_PORT      UIP_HTONS(COAP_DEFAULT_PORT + 1)
 #define REMOTE_PORT     UIP_HTONS(COAP_DEFAULT_PORT)
+
+static const char *service_urls[] =
+  { ".well-known/core", "/3/0/3", "/3/0/1" };
+
+#define MAX_NODES 10
+
+#define NODE_HAS_TYPE  (1 << 0)
+
+struct node {
+  uip_ipaddr_t ipaddr;
+  char type[32];
+  uint8_t flags;
+  uint8_t retries;
+};
+static struct node nodes[MAX_NODES];
+static uint8_t node_count;
+
+static struct node *current_target;
 
 PROCESS(router_process, "router process");
 AUTOSTART_PROCESSES(&router_process);
+/*---------------------------------------------------------------------------*/
+static struct node *
+add_node(const uip_ipaddr_t *addr)
+{
+  int i;
+  for(i = 0; i < node_count; i++) {
+    if(uip_ipaddr_cmp(&nodes[i].ipaddr, addr)) {
+      /* Node already added */
+      return &nodes[i];
+    }
+  }
+  if(node_count < MAX_NODES) {
+    uip_ipaddr_copy(&nodes[node_count].ipaddr, addr);
+    return &nodes[node_count++];
+  }
+  return NULL;
+}
 /*---------------------------------------------------------------------------*/
 /**
  * This function is will be passed to COAP_BLOCKING_REQUEST() to
@@ -62,6 +97,18 @@ client_chunk_handler(void *response)
   const uint8_t *chunk;
   int len = coap_get_payload(response, &chunk);
   printf("|%.*s", len, (char *)chunk);
+  if(current_target != NULL) {
+    if(len > sizeof(current_target->type) - 1) {
+      len = sizeof(current_target->type) - 1;
+    }
+    memcpy(current_target->type, chunk, len);
+    current_target->type[len] = 0;
+    current_target->flags |= NODE_HAS_TYPE;
+
+    PRINTF("\nNODE ");
+    PRINT6ADDR(&current_target->ipaddr);
+    PRINTF(" HAS TYPE %s\n", current_target->type);
+  }
 }
 /*---------------------------------------------------------------------------*/
 static void
@@ -126,10 +173,9 @@ PROCESS_THREAD(router_process, ev, data)
   /* This way the packet can be treated as pointer as usual. */
   static coap_packet_t request[1];
   static struct etimer timer;
-  int num_size;
-  int n;
   uip_ds6_route_t *r;
   uip_ipaddr_t *nexthop;
+  int n;
 
   PROCESS_BEGIN();
 
@@ -148,27 +194,55 @@ PROCESS_THREAD(router_process, ev, data)
   while(1) {
     PROCESS_YIELD();
 
-    if(ev == PROCESS_EVENT_TIMER && etimer_expired(&timer) {
+    if(ev == PROCESS_EVENT_TIMER && etimer_expired(&timer)) {
       etimer_restart(&timer);
 
-      num_routes = uip_ds6_route_num_routes();
-      PRINTF("\nRoutes: %u routes\n", num_routes);
-
+      current_target = NULL;
       n = 0;
       for(r = uip_ds6_route_head(); r != NULL; r = uip_ds6_route_next(r)) {
+        current_target = add_node(&r->ipaddr);
+        if(current_target == NULL ||
+           (current_target->flags & NODE_HAS_TYPE) != 0 ||
+           current_target->retries > 5) {
+          continue;
+        }
         PRINTF("  ");
         PRINT6ADDR(&r->ipaddr);
         PRINTF("  ->  ");
         nexthop = uip_ds6_route_nexthop(r);
         if(nexthop != NULL) {
           PRINT6ADDR(nexthop);
+          PRINTF("\n");
         } else {
-          PRINT("-");
+          PRINTF("-");
         }
         PRINTF("\n");
         n++;
+        break;
       }
-      PRINTF("Found %u routes\n", n);
+      PRINTF("Found %u new routes\n", n);
+
+      if(current_target != NULL &&
+         (current_target->flags & NODE_HAS_TYPE) == 0 &&
+         current_target->retries < 6) {
+        /* prepare request, TID is set by COAP_BLOCKING_REQUEST() */
+        coap_init_message(request, COAP_TYPE_CON, COAP_GET, 0);
+        coap_set_header_uri_path(request, service_urls[2]);
+
+        current_target->retries++;
+        /* const char msg[] = "Toggle!"; */
+        /* coap_set_payload(request, (uint8_t *)msg, sizeof(msg) - 1); */
+
+        PRINTF("CoAP request to ");
+        PRINT6ADDR(&current_target->ipaddr);
+        PRINTF(" : %u (%u tx)\n", UIP_HTONS(REMOTE_PORT),
+               current_target->retries);
+
+        COAP_BLOCKING_REQUEST(&current_target->ipaddr, REMOTE_PORT, request,
+                              client_chunk_handler);
+
+        printf("\n--Done--\n");
+      }
     }
   }
 

@@ -30,6 +30,12 @@
 #ifndef PROJECT_CONF_H_
 #define PROJECT_CONF_H_
 
+#ifdef BOARD_STRING
+#define LWM2M_DEVICE_MODEL_NUMBER BOARD_STRING
+#elif defined(CONTIKI_TARGET_WISMOTE)
+#define LWM2M_DEVICE_MODEL_NUMBER "wismote"
+#endif
+
 /**
  * Disabling RDC and CSMA to save memory on constrained devices.
  */
