@@ -1,4 +1,4 @@
-CONTIKI_PROJECT = example-ipso-objects
+CONTIKI_PROJECT = example-ipso-objects example-server.c
 
 all: $(CONTIKI_PROJECT)
 

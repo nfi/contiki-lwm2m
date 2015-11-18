@@ -30,7 +30,7 @@
 
 /**
  * \file
- *      IPSO Object and OMA LWM2M example.
+ *      OMA LWM2M and IPSO Objects example.
  * \author
  *      Joakim Eriksson, joakime@sics.se
  *      Niclas Finne, nfi@sics.se
@@ -56,6 +56,9 @@ PROCESS_THREAD(example_ipso_objects, ev, data)
 
   /* Initialize the OMA LWM2M engine */
   lwm2m_engine_init();
+
+  lwm2m_engine_use_bootstrap_server(0);
+  lwm2m_engine_use_registration_server(0);
 
   /* Register default LWM2M objects */
   lwm2m_engine_register_default_objects();

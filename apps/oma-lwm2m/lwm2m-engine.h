@@ -56,7 +56,10 @@ typedef enum {
 
 void lwm2m_engine_init(void);
 void lwm2m_engine_register_default_objects(void);
-void lwm2m_register_with(const uip_ipaddr_t *server);
+void lwm2m_engine_use_bootstrap_server(int use);
+void lwm2m_engine_use_registration_server(int use);
+void lwm2m_engine_register_with(const uip_ipaddr_t *server, uint16_t port);
+void lwm2m_engine_register_bootstrap_with(const uip_ipaddr_t *server, uint16_t port);
 
 const lwm2m_object_t *lwm2m_engine_get_object(uint16_t id);
 

@@ -86,9 +86,14 @@ static char rd_data[128]; /* allocate some data for the RD */
 PROCESS(lwm2m_rd_client, "LWM2M Engine");
 
 static uip_ipaddr_t server_ipaddr;
-static uint16_t server_port;
+static uint16_t server_port = REMOTE_PORT;
 static uip_ipaddr_t bs_server_ipaddr;
+static uint16_t bs_server_port = BS_REMOTE_PORT;
 
+static uint8_t use_bootstrap = 0;
+static uint8_t has_bootstrap_server_info = 0;
+static uint8_t use_registration = 0;
+static uint8_t has_registration_server_info = 0;
 static uint8_t registered = 0;
 static uint8_t bootstrapped = 0; /* bootstrap made... */
 
@@ -135,15 +140,112 @@ has_network_access(void)
   return 1;
 }
 /*---------------------------------------------------------------------------*/
+void
+lwm2m_engine_use_bootstrap_server(int use)
+{
+  use_bootstrap = use != 0;
+  if(use_bootstrap) {
+    process_poll(&lwm2m_rd_client);
+  }
+}
+/*---------------------------------------------------------------------------*/
+void
+lwm2m_engine_use_registration_server(int use)
+{
+  use_registration = use != 0;
+  if(use_registration) {
+    process_poll(&lwm2m_rd_client);
+  }
+}
+/*---------------------------------------------------------------------------*/
+void
+lwm2m_engine_register_with_server(const uip_ipaddr_t *server, uint16_t port)
+{
+  uip_ipaddr_copy(&server_ipaddr, server);
+  if(port != 0) {
+    server_port = port;
+  } else {
+    server_port = REMOTE_PORT;
+  }
+  has_registration_server_info = 1;
+  registered = 0;
+  if(use_registration) {
+    process_poll(&lwm2m_rd_client);
+  }
+}
+/*---------------------------------------------------------------------------*/
+static int
+update_registration_server(void)
+{
+  if(has_registration_server_info) {
+    return 1;
+  }
+
+#if UIP_CONF_IPV6_RPL
+  {
+    rpl_dag_t *dag;
+
+    /* Use the DAG id as server address if no other has been specified */
+    dag = rpl_get_any_dag();
+    if(dag != NULL) {
+      uip_ipaddr_copy(&server_ipaddr, &dag->dag_id);
+      server_port = REMOTE_PORT;
+      return 1;
+    }
+  }
+#endif /* UIP_CONF_IPV6_RPL */
+
+  return 0;
+}
+/*---------------------------------------------------------------------------*/
+void
+lwm2m_engine_register_with_bootstrap_server(const uip_ipaddr_t *server,
+                                            uint16_t port)
+{
+  uip_ipaddr_copy(&bs_server_ipaddr, server);
+  if(port != 0) {
+    bs_server_port = port;
+  } else {
+    bs_server_port = BS_REMOTE_PORT;
+  }
+  has_bootstrap_server_info = 1;
+  bootstrapped = 0;
+  registered = 0;
+  if(use_bootstrap) {
+    process_poll(&lwm2m_rd_client);
+  }
+}
+/*---------------------------------------------------------------------------*/
+static int
+update_bootstrap_server(void)
+{
+  if(has_bootstrap_server_info) {
+    return 1;
+  }
+
+#if UIP_CONF_IPV6_RPL
+  {
+    rpl_dag_t *dag;
+
+    /* Use the DAG id as server address if no other has been specified */
+    dag = rpl_get_any_dag();
+    if(dag != NULL) {
+      uip_ipaddr_copy(&bs_server_ipaddr, &dag->dag_id);
+      bs_server_port = REMOTE_PORT;
+      return 1;
+    }
+  }
+#endif /* UIP_CONF_IPV6_RPL */
+
+  return 0;
+}
+/*---------------------------------------------------------------------------*/
 PROCESS_THREAD(lwm2m_rd_client, ev, data)
 {
   static coap_packet_t request[1];      /* This way the packet can be treated as pointer as usual. */
   static struct etimer et;
 
   PROCESS_BEGIN();
-
-  /* hardcoded BS server for now */
-  uip_ip6addr(&bs_server_ipaddr, 0xaaaa, 0, 0, 0, 0, 0, 0, 0x1);
 
   printf("RD Client started with endpoint '%s'\n", endpoint);
 
@@ -155,20 +257,22 @@ PROCESS_THREAD(lwm2m_rd_client, ev, data)
     if(etimer_expired(&et)) {
       if(!has_network_access()) {
         /* Wait until for a network to join */
-      } else if(bootstrapped == 0) {
-        /* prepare request, TID is set by COAP_BLOCKING_REQUEST() */
-        coap_init_message(request, COAP_TYPE_CON, COAP_POST, 0);
-        coap_set_header_uri_path(request, "/bs");
-        coap_set_header_uri_query(request, endpoint);
+      } else if(use_bootstrap && bootstrapped == 0) {
+        if(update_bootstrap_server()) {
+          /* prepare request, TID is set by COAP_BLOCKING_REQUEST() */
+          coap_init_message(request, COAP_TYPE_CON, COAP_POST, 0);
+          coap_set_header_uri_path(request, "/bs");
+          coap_set_header_uri_query(request, endpoint);
 
-        printf("Registering ID with bootstrap server [");
-        uip_debug_ipaddr_print(&bs_server_ipaddr);
-        printf("]:%u as '%s'\n", uip_ntohs(BS_REMOTE_PORT), endpoint);
+          printf("Registering ID with bootstrap server [");
+          uip_debug_ipaddr_print(&bs_server_ipaddr);
+          printf("]:%u as '%s'\n", uip_ntohs(bs_server_port), endpoint);
 
-        COAP_BLOCKING_REQUEST(&bs_server_ipaddr, BS_REMOTE_PORT, request,
-                              client_chunk_handler);
-        bootstrapped++;
-      } else if(bootstrapped == 1) {
+          COAP_BLOCKING_REQUEST(&bs_server_ipaddr, bs_server_port, request,
+                                client_chunk_handler);
+          bootstrapped++;
+        }
+      } else if(use_bootstrap && bootstrapped == 1) {
         lwm2m_context_t context;
         const lwm2m_instance_t *instance = NULL;
         const lwm2m_resource_t *rsc;
@@ -216,12 +320,11 @@ PROCESS_THREAD(lwm2m_rd_client, ev, data)
               PRINTF("Server address ");
               PRINT6ADDR(&addr);
               PRINTF(" port %ld%s\n", (long)port, secure ? " (secure)" : "");
-              uip_ipaddr_copy(&server_ipaddr, &addr);
-              server_port = UIP_HTONS((uint16_t)port);
-
               if(secure) {
                 printf("Secure CoAP requested but not supported - can not bootstrap\n");
               } else {
+                lwm2m_engine_register_with_server(&addr,
+                                                  UIP_HTONS((uint16_t)port));
                 bootstrapped++;
               }
             } else {
@@ -235,7 +338,8 @@ PROCESS_THREAD(lwm2m_rd_client, ev, data)
           bootstrapped = 0;
         }
 
-      } else if(!registered) {
+      } else if(use_registration && !registered &&
+                update_registration_server()) {
         int pos;
         int len, i, j;
         registered = 1;
@@ -277,18 +381,12 @@ PROCESS_THREAD(lwm2m_rd_client, ev, data)
 }
 /*---------------------------------------------------------------------------*/
 void
-lwm2m_register_with(const uip_ipaddr_t *server)
-{
-  uip_ipaddr_copy(&server_ipaddr, server);
-  process_poll(&lwm2m_rd_client);
-}
-/*---------------------------------------------------------------------------*/
-void
 lwm2m_engine_init(void)
 {
 #ifdef LWM2M_ENGINE_CLIENT_ENDPOINT_NAME
 
-  snprintf(endpoint, sizeof(endpoint), "?ep=" LWM2M_ENGINE_CLIENT_ENDPOINT_NAME);
+  snprintf(endpoint, sizeof(endpoint) - 1,
+           "?ep=" LWM2M_ENGINE_CLIENT_ENDPOINT_NAME);
 
 #else /* LWM2M_ENGINE_CLIENT_ENDPOINT_NAME */
 
@@ -327,7 +425,7 @@ lwm2m_engine_init(void)
   /* a zero at end of string */
   client[len] = 0;
   /* create endpoint */
-  snprintf(endpoint, sizeof(endpoint), "?ep=%s", client);
+  snprintf(endpoint, sizeof(endpoint) - 1, "?ep=%s", client);
 
 #endif /* LWM2M_ENGINE_CLIENT_ENDPOINT_NAME */
 
@@ -468,8 +566,8 @@ get_instance(const lwm2m_object_t *object, lwm2m_context_t *context, int depth)
 static const lwm2m_resource_t *
 get_resource(const lwm2m_instance_t *instance, lwm2m_context_t *context)
 {
+  int i;
   if(instance != NULL) {
-    int i;
     PRINTF("lwm2m: searching for resource %u\n", context->resource_id);
     for(i = 0; i < instance->count; i++) {
       PRINTF("  Resource %d -> %u\n", i, instance->resources[i].id);
@@ -483,8 +581,9 @@ get_resource(const lwm2m_instance_t *instance, lwm2m_context_t *context)
 }
 /*---------------------------------------------------------------------------*/
 void
-lwm2m_engine_handler(const lwm2m_object_t *object, void *request,
-                     void *response, uint8_t *buffer, uint16_t preferred_size,
+lwm2m_engine_handler(const lwm2m_object_t *object,
+                     void *request, void *response,
+                     uint8_t *buffer, uint16_t preferred_size,
                      int32_t *offset)
 {
   int len;
