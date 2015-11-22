@@ -78,13 +78,14 @@ oma_tlv_read(oma_tlv_t *tlv, const uint8_t *buffer, size_t len)
 
   tlv->type = (buffer[0] >> 6) & 3;
   len_type = (buffer[0] >> 3) & 3;
-  len_pos = 1 + (buffer[0] >> 5) != 0 ? 2 : 1;
+  len_pos = 1 + ((buffer[0] & (1 << 5) != 0) ? 2 : 1);
 
   tlv->id = buffer[1];
   /* if len_pos is larger than two it means that there is more ID to read */
   if(len_pos > 2) {
-    tlv->id = (tlv->id << 8) | buffer[2];
+    tlv->id = (tlv->id << 8) + buffer[2];
   }
+
   if(len_type == 0) {
     tlv_len = buffer[0] & 7;
   } else {
