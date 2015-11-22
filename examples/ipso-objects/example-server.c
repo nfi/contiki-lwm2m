@@ -43,6 +43,9 @@
 #include "er-coap-constants.h"
 #include "er-coap-engine.h"
 #include "lwm2m-engine.h"
+#include "oma-tlv.h"
+#include "dev/serial-line.h"
+#include "serial-protocol.h"
 
 #define DEBUG DEBUG_PRINT
 #include "net/ip/uip-debug.h"
@@ -64,11 +67,16 @@ struct node {
   uint8_t flags;
   uint8_t retries;
 };
+
 static struct node nodes[MAX_NODES];
 static uint8_t node_count;
 
 static struct node *current_target;
+static char current_uri[32] = URL_LIGHT_CONTROL;
+static char current_value[32] = "1";
+static int current_request = COAP_PUT;
 static uint8_t fetching_type = 0;
+
 
 PROCESS(router_process, "router process");
 AUTOSTART_PROCESSES(&router_process);
@@ -90,6 +98,65 @@ add_node(const uip_ipaddr_t *addr)
   return NULL;
 }
 /*---------------------------------------------------------------------------*/
+void uip_debug_ipaddr_print(const uip_ipaddr_t *addr);
+
+void
+set_value(const uip_ipaddr_t *addr, char *uri, char *value)
+{
+  int i;
+  printf("#set value ");
+  uip_debug_ipaddr_print(addr);
+  printf(" URI: %s Value: %s\n", uri, value);
+
+  for(i = 0; i < node_count; i++) {
+    if(uip_ipaddr_cmp(&nodes[i].ipaddr, addr)) {
+      /* setup command */
+      current_target = &nodes[i];
+      current_request = COAP_PUT;
+      strncpy(current_uri, uri, sizeof(current_uri));
+      strncpy(current_value, value, sizeof(current_value));
+    }
+  }
+
+}
+
+void
+get_value(const uip_ipaddr_t *addr, char *uri)
+{
+  int i;
+  printf("#get value ");
+  uip_debug_ipaddr_print(addr);
+  printf(" URI: %s\n", uri);
+
+  for(i = 0; i < node_count; i++) {
+    if(uip_ipaddr_cmp(&nodes[i].ipaddr, addr)) {
+      /* setup command */
+      current_target = &nodes[i];
+      current_request = COAP_GET;
+      strncpy(current_uri, uri, sizeof(current_uri));
+      current_value[0] = 0;
+    }
+  }
+}
+
+void
+print_node_list(void) {
+  int i;
+  int out = 0;
+  for(i = 0; i < node_count; i++) {
+    if(nodes[i].flags & NODE_HAS_TYPE) {
+      if(out++) {
+        printf(";");
+      }
+      printf("%s,", nodes[i].type);
+      uip_debug_ipaddr_print(&nodes[i].ipaddr);
+    }
+  }
+  printf("\n");
+}
+
+
+/*---------------------------------------------------------------------------*/
 /**
  * This function is will be passed to COAP_BLOCKING_REQUEST() to
  * handle responses.
@@ -98,10 +165,13 @@ static void
 client_chunk_handler(void *response)
 {
   const uint8_t *chunk;
+  unsigned int format;
   int len = coap_get_payload(response, &chunk);
-  if(len > 0) {
-    printf("|%.*s", len, (char *)chunk);
-  }
+  coap_get_header_content_format(response, &format);
+
+  /* if(len > 0) { */
+  /*   printf("|%.*s (%d,%d)", len, (char *)chunk, len, format); */
+  /* } */
   if(current_target != NULL && fetching_type) {
     if(len > sizeof(current_target->type) - 1) {
       len = sizeof(current_target->type) - 1;
@@ -113,6 +183,25 @@ client_chunk_handler(void *response)
     PRINTF("\nNODE ");
     PRINT6ADDR(&current_target->ipaddr);
     PRINTF(" HAS TYPE %s\n", current_target->type);
+  } else {
+    /* otherwise update the current value */
+    if(format == LWM2M_TLV) {
+      oma_tlv_t tlv;
+      /* we can only read int32 for now ? */
+      if(oma_tlv_read(&tlv, chunk, len) > 0) {
+        /* printf("TLV.type=%d len=%d id=%d value[0]=%d\n", */
+        /*        tlv.type, tlv.length, tlv.id, tlv.value[0]); */
+
+        int value = oma_tlv_get_int32(&tlv);
+        snprintf(current_value, sizeof(current_value), "%d", value);
+      }
+    } else {
+      if(len > sizeof(current_value) - 1) {
+        len = sizeof(current_value) - 1;
+      }
+      memcpy(current_value, chunk, len);
+      current_value[len] = 0;
+    }
   }
 }
 /*---------------------------------------------------------------------------*/
@@ -124,6 +213,11 @@ setup_network(void)
   rpl_dag_t *dag;
   int i;
   uint8_t state;
+
+#if CONTIKI_TARGET_WISMOTE
+  uart1_set_input(serial_line_input_byte);
+  serial_line_init();
+#endif
 
 #if UIP_CONF_ROUTER
 /**
@@ -199,6 +293,11 @@ PROCESS_THREAD(router_process, ev, data)
     etimer_set(&timer, CLOCK_SECOND * 5);
     PROCESS_YIELD();
 
+    /* Handle serial line input */
+    if(ev == serial_line_event_message) {
+      serial_protocol_input((char *) data);
+    }
+
     if(etimer_expired(&timer)) {
       current_target = NULL;
       n = 0;
@@ -223,9 +322,9 @@ PROCESS_THREAD(router_process, ev, data)
         n++;
         break;
       }
-      PRINTF("Found %u new routes\n", n);
     }
 
+    /* This is a node type discovery */
     if(current_target != NULL &&
        (current_target->flags & NODE_HAS_TYPE) == 0 &&
        current_target->retries < 6) {
@@ -245,26 +344,41 @@ PROCESS_THREAD(router_process, ev, data)
       COAP_BLOCKING_REQUEST(&current_target->ipaddr, REMOTE_PORT, request,
                             client_chunk_handler);
       fetching_type = 0;
-
+      strncpy(current_uri, URL_LIGHT_CONTROL, sizeof(current_uri));
       printf("\n--Done--\n");
+    }
 
-      if(current_target->flags & NODE_HAS_TYPE) {
-        /* prepare request, TID is set by COAP_BLOCKING_REQUEST() */
-        coap_init_message(request, COAP_TYPE_CON, COAP_PUT, 0);
-        coap_set_header_uri_path(request, URL_LIGHT_CONTROL);
+    /* If having a type this is another type of request */
+    if(current_target->flags & NODE_HAS_TYPE && strlen(current_uri) > 0) {
+      /* prepare request, TID is set by COAP_BLOCKING_REQUEST() */
+      coap_init_message(request, COAP_TYPE_CON, current_request, 0);
+      coap_set_header_uri_path(request, current_uri);
 
-        const char msg[] = "1";
-        coap_set_payload(request, (uint8_t *)msg, sizeof(msg) - 1);
-
-        PRINTF("CoAP light control to ");
-        PRINT6ADDR(&current_target->ipaddr);
-        PRINTF(" : %u\n", UIP_HTONS(REMOTE_PORT));
-
-        COAP_BLOCKING_REQUEST(&current_target->ipaddr, REMOTE_PORT, request,
-                              client_chunk_handler);
-
-        printf("\n--Done--\n");
+      if(strlen(current_value) > 0) {
+        coap_set_payload(request, (uint8_t *) current_value,
+                         strlen(current_value));
       }
+
+      PRINTF("CoAP request to ");
+      PRINT6ADDR(&current_target->ipaddr);
+      PRINTF(" : %u %s\n", UIP_HTONS(REMOTE_PORT), current_uri);
+
+      COAP_BLOCKING_REQUEST(&current_target->ipaddr, REMOTE_PORT, request,
+                            client_chunk_handler);
+
+      /* print out result of command */
+      if(current_request == COAP_PUT) {
+        printf("s ");
+      } else {
+        printf("g ");
+      }
+      uip_debug_ipaddr_print(&current_target->ipaddr);
+      printf(" %s %s\n", current_uri, current_value);
+
+      current_target = NULL;
+      current_uri[0] = 0;
+      current_value[0] = 0;
+
     }
   }
 

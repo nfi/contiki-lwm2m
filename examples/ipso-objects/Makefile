@@ -1,4 +1,6 @@
-CONTIKI_PROJECT = example-ipso-objects example-server.c
+CONTIKI_PROJECT = example-ipso-objects.c example-server.c
+
+PROJECT_SOURCEFILES += serial-protocol.c
 
 all: $(CONTIKI_PROJECT)
 
