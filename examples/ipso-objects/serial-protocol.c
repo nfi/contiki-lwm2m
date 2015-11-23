@@ -63,7 +63,6 @@ serial_protocol_input(char *data)
   case 'g': {
     uip_ip6addr_t ipaddr;
     char *uri;
-    char *value;
     pos = find_next_sep(data, ' ', pos);
     if(pos > 0) {
       /* start of IP */

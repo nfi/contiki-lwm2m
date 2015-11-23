@@ -47,6 +47,10 @@
 #include "dev/serial-line.h"
 #include "serial-protocol.h"
 
+#if CONTIKI_TARGET_WISMOTE
+#include "dev/uart1.h"
+#endif
+
 #define DEBUG DEBUG_PRINT
 #include "net/ip/uip-debug.h"
 
@@ -56,6 +60,7 @@
 #define URL_DEVICE_MODEL             "/3/0/1"
 #define URL_DEVICE_FIRMWARE_VERSION  "/3/0/3"
 #define URL_LIGHT_CONTROL            "/3311/0/5850"
+#define URL_POWER_CONTROL            "/3312/0/5850"
 
 #define MAX_NODES 10
 
@@ -98,8 +103,6 @@ add_node(const uip_ipaddr_t *addr)
   return NULL;
 }
 /*---------------------------------------------------------------------------*/
-void uip_debug_ipaddr_print(const uip_ipaddr_t *addr);
-
 void
 set_value(const uip_ipaddr_t *addr, char *uri, char *value)
 {
@@ -113,8 +116,10 @@ set_value(const uip_ipaddr_t *addr, char *uri, char *value)
       /* setup command */
       current_target = &nodes[i];
       current_request = COAP_PUT;
-      strncpy(current_uri, uri, sizeof(current_uri));
-      strncpy(current_value, value, sizeof(current_value));
+      strncpy(current_uri, uri, sizeof(current_uri) - 1);
+      strncpy(current_value, value, sizeof(current_value) - 1);
+      process_poll(&router_process);
+      break;
     }
   }
 
@@ -133,8 +138,10 @@ get_value(const uip_ipaddr_t *addr, char *uri)
       /* setup command */
       current_target = &nodes[i];
       current_request = COAP_GET;
-      strncpy(current_uri, uri, sizeof(current_uri));
+      strncpy(current_uri, uri, sizeof(current_uri) - 1);
       current_value[0] = 0;
+      process_poll(&router_process);
+      break;
     }
   }
 }
@@ -335,9 +342,9 @@ PROCESS_THREAD(router_process, ev, data)
 
       current_target->retries++;
 
-      PRINTF("CoAP request to ");
+      PRINTF("CoAP request to [");
       PRINT6ADDR(&current_target->ipaddr);
-      PRINTF(" : %u (%u tx)\n", UIP_HTONS(REMOTE_PORT),
+      PRINTF("]:%u (%u tx)\n", UIP_HTONS(REMOTE_PORT),
              current_target->retries);
 
       fetching_type = 1;
@@ -349,7 +356,8 @@ PROCESS_THREAD(router_process, ev, data)
     }
 
     /* If having a type this is another type of request */
-    if(current_target->flags & NODE_HAS_TYPE && strlen(current_uri) > 0) {
+    if(current_target != NULL &&
+       (current_target->flags & NODE_HAS_TYPE) && strlen(current_uri) > 0) {
       /* prepare request, TID is set by COAP_BLOCKING_REQUEST() */
       coap_init_message(request, COAP_TYPE_CON, current_request, 0);
       coap_set_header_uri_path(request, current_uri);
@@ -359,9 +367,9 @@ PROCESS_THREAD(router_process, ev, data)
                          strlen(current_value));
       }
 
-      PRINTF("CoAP request to ");
+      PRINTF("CoAP request to [");
       PRINT6ADDR(&current_target->ipaddr);
-      PRINTF(" : %u %s\n", UIP_HTONS(REMOTE_PORT), current_uri);
+      PRINTF("]:%u %s\n", UIP_HTONS(REMOTE_PORT), current_uri);
 
       COAP_BLOCKING_REQUEST(&current_target->ipaddr, REMOTE_PORT, request,
                             client_chunk_handler);
